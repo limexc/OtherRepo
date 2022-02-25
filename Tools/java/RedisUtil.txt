@@ -1,0 +1,101 @@
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.connection.RedisConnection;
+import org.springframework.data.redis.core.Cursor;
+import org.springframework.data.redis.core.RedisCallback;
+import org.springframework.data.redis.core.ScanOptions;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.serializer.RedisSerializer;
+import org.springframework.stereotype.Component;
+
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
+@Slf4j
+@Component
+public class RedisUtil {
+
+    @Autowired
+    private StringRedisTemplate stringRedisTemplate;
+
+    /**
+     * 管道批量新增
+     */
+    public void executePipelined(Map<String, String> map, long seconds) {
+        RedisSerializer<String> serializer = stringRedisTemplate.getStringSerializer();
+        stringRedisTemplate.executePipelined((RedisCallback<String>) connection -> {
+            map.forEach((key, value) -> {
+                connection.set(serializer.serialize(key), serializer.serialize(value));
+            });
+            return null;
+        }, serializer);
+    }
+
+    /**
+     * 管道批量删除
+     *
+     * @param keys
+     */
+    public void executeDeletePipelined(List<String> keys) {
+        log.info("删除数量={}", keys.size());
+        RedisSerializer<String> serializer = stringRedisTemplate.getStringSerializer();
+        stringRedisTemplate.executePipelined((RedisCallback<String>) connection -> {
+            keys.forEach(key -> {
+                connection.del(serializer.serialize(key));
+            });
+            return null;
+        }, serializer);
+    }
+
+    /**
+     * 扫描并删除
+     *
+     * @param pattern
+     * @return
+     */
+    public long scanAndDelete(String pattern) {
+        long start = System.currentTimeMillis();
+        long cursorId = this.stringRedisTemplate.execute((RedisConnection connection) -> {
+            //这里传了count的值不管用，依然会遍历出所有符合条件的key
+            try (Cursor<byte[]> cursor = connection.scan(ScanOptions.scanOptions().match(pattern).build())) {
+                ArrayList<String> list = new ArrayList<>();
+                while (cursor.hasNext()) {
+                    list.add(new String(cursor.next(), StandardCharsets.UTF_8));
+                    if (list.size() == 10000) {
+                        //批量删除
+                        this.executeDeletePipelined(list);
+                        list = new ArrayList<>();
+                    }
+                }
+                if (list.size() > 0) {
+                    //批量删除
+                    this.executeDeletePipelined(list);
+                }
+                return cursor.getCursorId();
+            } catch (Exception e) {
+                e.printStackTrace();
+                throw new RuntimeException(e);
+            }
+        });
+        log.info("本次删除耗时={}", System.currentTimeMillis() - start);
+        return cursorId;
+    }
+    /**
+     * 管道批量查询
+     *
+     * @param keys
+     */
+    public void executPipelineGet(Collection<String> keys) {
+        log.info("查询数量={}", keys.size());
+        RedisSerializer<String> serializer = stringRedisTemplate.getStringSerializer();
+        final List<Object> objects = stringRedisTemplate.executePipelined((RedisCallback<String>) connection -> {
+            keys.forEach(key -> {
+                connection.get(serializer.serialize(key));
+            });
+            return null;//这里必须返回null
+        }, serializer);
+        final List<String> collect = objects.stream().map(x -> x.toString()).collect(Collectors.toList());
+        log.info("pip批量查询={}", collect);
+    }
